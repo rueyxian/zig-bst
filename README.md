@@ -1,1 +1,1 @@
-# zig-bst
+# zig-search-tree
