@@ -3,6 +3,7 @@ const debug = std.debug;
 const testing = std.testing;
 const math = std.math;
 const print = debug.print;
+const mem = std.mem;
 
 pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
     return struct {
@@ -19,6 +20,18 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
             children: [2]?*Node,
             height: usize = 0,
 
+            pub fn get_min(self: *Node) *Node {
+                var node: *Node = self;
+                while (node.children[0]) |curr| : (node = curr) {}
+                return node;
+            }
+
+            pub fn get_max(self: *Node) *Node {
+                var node: *Node = self;
+                while (node.children[1]) |curr| : (node = curr) {}
+                return node;
+            }
+
             fn balance_factor(self: *const Node) i8 {
                 const lh: isize = @as(isize, @intCast(if (self.children[0]) |n| n.height else 0));
                 const rh: isize = @as(isize, @intCast(if (self.children[1]) |n| n.height else 0));
@@ -33,19 +46,11 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
         };
 
         pub fn get_min(self: Self) ?*Node {
-            var node = self.root;
-            while (node) |curr| {
-                node = curr.children[0] orelse break;
-            }
-            return node;
+            return (self.root orelse return null).get_min();
         }
 
         pub fn get_max(self: Self) ?*Node {
-            var node = self.root;
-            while (node) |curr| {
-                node = curr.children[1] orelse break;
-            }
-            return node;
+            return (self.root orelse return null).get_max();
         }
 
         pub const Entry = struct {
@@ -85,7 +90,7 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
             }
         };
 
-        fn get_entry_for(self: *Self, key: Key) Entry {
+        pub fn get_entry_for(self: *Self, key: Key) Entry {
             var parent: ?*Node = undefined;
             const node: ?*Node = self.find(key, &parent);
             return Entry{
@@ -96,7 +101,7 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
             };
         }
 
-        fn get_entry_for_existing(self: *Self, node: *Node) Entry {
+        pub fn get_entry_for_existing(self: *Self, node: *Node) Entry {
             debug.assert(node.height != 0);
             return Entry{
                 .avl = self,
@@ -126,10 +131,8 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
             const link: *?*Node = if (parent) |p| &p.children[@intFromBool(compare(key, p.key) == .gt)] else &self.root;
             debug.assert(link.* == null);
             link.* = node;
-            var to_balance = node.parent;
-            while (to_balance) |n| : (to_balance = n.parent) {
-                self.rebalance(n);
-            }
+            var to_rebalance = node.parent;
+            while (to_rebalance) |n| : (to_rebalance = n.parent) self.rebalance(n);
         }
 
         fn replace(self: *Self, old: *Node, new: *Node) void {
@@ -157,61 +160,37 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
         }
 
         fn remove(self: *Self, node: *Node) void {
-            const link: *?*Node = if (node.parent) |p| &p.children[@intFromBool(p.children[0] != node)] else &self.root;
+            while (true) {
+                const inorder = (node.children[0] orelse (node.children[1] orelse break).get_min()).get_max();
+
+                var link: *?*Node = if (node.parent) |p| &p.children[@intFromBool(p.children[1] == node)] else &self.root;
+                debug.assert(link.* == node);
+                link.* = inorder;
+
+                link = if (inorder.parent) |p| &p.children[@intFromBool(p.children[1] == inorder)] else unreachable;
+                debug.assert(link.* == inorder);
+                link.* = node;
+
+                mem.swap(usize, &inorder.height, &node.height);
+                mem.swap(?*Node, &inorder.parent, &node.parent);
+                mem.swap([2]?*Node, &inorder.children, &node.children);
+
+                if (node.children[0]) |n| n.parent = node;
+                if (node.children[1]) |n| n.parent = node;
+                if (inorder.children[0]) |n| n.parent = inorder;
+                if (inorder.children[1]) |n| n.parent = inorder;
+            }
+
+            const link: *?*Node = if (node.parent) |p| &p.children[@intFromBool(p.children[1] == node)] else &self.root;
             debug.assert(link.* == node);
-            defer {
-                var to_balance = link.* orelse node.parent;
-                while (to_balance) |n| : (to_balance = n.parent) {
-                    self.rebalance(n);
-                }
-                node.parent = null;
-                node.children = [_]?*Node{ null, null };
-                node.height = 0;
-            }
+            link.* = null;
 
-            const left_child: ?*Node = node.children[0];
-            const right_child: ?*Node = node.children[1];
-            if (left_child == null and right_child == null) {
-                link.* = null;
-                return;
-            }
-            if (left_child != null and right_child == null) {
-                left_child.?.parent = node.parent;
-                link.* = left_child;
-                return;
-            }
-            if (left_child == null and right_child != null) {
-                right_child.?.parent = node.parent;
-                link.* = right_child;
-                return;
-            }
+            var to_rebalance: ?*Node = node.parent;
+            while (to_rebalance) |n| : (to_rebalance = n.parent) self.rebalance(n);
 
-            const inorder = inorder: {
-                var inorder: *Node = node.children[1].?;
-                while (inorder.children[0]) |child| {
-                    inorder = child;
-                }
-                debug.assert(inorder.children[0] == null);
-                break :inorder inorder; // inorder successor
-            };
-            if (inorder.parent) |p| {
-                const inorder_link: *?*Node = &p.children[@intFromBool(p.children[0] != inorder)];
-                debug.assert(inorder_link.* == inorder);
-                debug.assert(assert: {
-                    const a = p == node and p.children[1] == inorder;
-                    const b = p != node and p.children[0] == inorder;
-                    break :assert a or b;
-                });
-                if (inorder.children[1]) |n| n.parent = inorder.parent;
-                inorder_link.* = inorder.children[1];
-            } else unreachable;
-
-            inorder.parent = node.parent;
-            inorder.children = node.children;
-            inorder.height = node.height;
-            if (inorder.children[0]) |n| n.parent = inorder;
-            if (inorder.children[1]) |n| n.parent = inorder;
-            link.* = inorder;
+            debug.assert(node.children[0] == null and node.children[1] == null);
+            node.parent = null;
+            node.height = 0;
         }
 
         fn rotate(self: *Self, node: *Node, right: bool) void {
