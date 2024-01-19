@@ -1,11 +1,11 @@
 const std = @import("std");
 const debug = std.debug;
-const testing = std.testing;
 const math = std.math;
 const print = debug.print;
+const testing = std.testing;
 const mem = std.mem;
 
-pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
+pub fn RedBlackTree(comptime Key: type, comptime compare_fn: anytype) type {
     return struct {
         root: ?*Node = null,
         const Self = @This();
@@ -14,11 +14,13 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
             return compare_fn(a, b);
         }
 
+        const Color = enum { red, black };
+
         pub const Node = struct {
             key: Key,
+            color: Color,
             parent: ?*Node,
             children: [2]?*Node,
-            height: usize = 0,
 
             pub fn get_min(self: *Node) *Node {
                 var node: *Node = self;
@@ -31,18 +33,6 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
                 while (node.children[1]) |curr| : (node = curr) {}
                 return node;
             }
-
-            fn balance_factor(self: *const Node) i8 {
-                const lh: isize = @as(isize, @intCast(if (self.children[0]) |n| n.height else 0));
-                const rh: isize = @as(isize, @intCast(if (self.children[1]) |n| n.height else 0));
-                return @intCast(rh - lh);
-            }
-
-            fn update_height(self: *Node) void {
-                const lh = if (self.children[0]) |n| n.height else 0;
-                const rh = if (self.children[1]) |n| n.height else 0;
-                self.height = 1 + @max(lh, rh);
-            }
         };
 
         pub fn get_min(self: Self) ?*Node {
@@ -54,7 +44,7 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
         }
 
         pub const Entry = struct {
-            avl: *Self,
+            tree: *Self,
             key: Key,
             node: ?*Node,
             context: union(enum) {
@@ -66,7 +56,7 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
                 defer self.node = new_node;
                 const new: *Node = new_node orelse {
                     if (self.node) |node| {
-                        self.avl.remove(node);
+                        self.tree.remove(node);
                         self.context = .removed;
                     }
                     return;
@@ -76,16 +66,16 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
                         var parent: ?*Node = undefined;
                         switch (self.context) {
                             .inserted_under => |p| parent = p,
-                            .removed => debug.assert(self.avl.find(self.key, &parent) == null),
+                            .removed => debug.assert(self.tree.find(self.key, &parent) == null),
                         }
                         break :blk parent;
                     };
                     debug.assert(self.node == null);
-                    self.avl.insert(self.key, parent, new);
+                    self.tree.insert(self.key, parent, new);
                     self.context = .{ .inserted_under = parent };
                     return;
                 };
-                self.avl.replace(old, new);
+                self.tree.replace(old, new);
             }
         };
 
@@ -93,7 +83,7 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
             var parent: ?*Node = undefined;
             const node: ?*Node = self.find(key, &parent);
             return Entry{
-                .avl = self,
+                .tree = self,
                 .key = key,
                 .context = .{ .inserted_under = parent },
                 .node = node,
@@ -101,9 +91,8 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
         }
 
         pub fn get_entry_for_existing(self: *Self, node: *Node) Entry {
-            debug.assert(node.height != 0);
             return Entry{
-                .avl = self,
+                .tree = self,
                 .key = node.key,
                 .node = node,
                 .context = .{ .inserted_under = node.parent },
@@ -126,32 +115,6 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
             const link = if (parent) |p| &p.children[@intFromBool(p.children[1] == node)] else &self.root;
             debug.assert(link.* == node);
             link.* = target;
-
-            node.update_height();
-            target.update_height();
-        }
-
-        fn rebalance(self: *Self, node_opt: ?*Node) void {
-            const node = node_opt orelse return;
-            node.update_height();
-            const right_heavy = switch (node.balance_factor()) {
-                -2 => false,
-                2 => true,
-                else => |bf| {
-                    debug.assert(bf < 2 and bf > -2);
-                    self.rebalance(node.parent);
-                    return;
-                },
-            };
-
-            const sub: *Node = node.children[@intFromBool(right_heavy)].?;
-            const sub_bf = sub.balance_factor();
-            debug.assert(sub_bf >= -1 and sub_bf <= 1);
-            if ((right_heavy and sub_bf == -1) or (!right_heavy and sub_bf == 1)) {
-                self.rotate(sub, right_heavy); // to make LR-imba or RL-imba into LL-imba or RR-imba respectively
-            }
-            self.rotate(node, !right_heavy); // to fix LL-imba or RR-imba
-            self.rebalance(node.parent);
         }
 
         fn find(self: *Self, key: Key, parent_ref: *?*Node) ?*Node {
@@ -168,37 +131,43 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
 
         fn insert(self: *Self, key: Key, parent: ?*Node, node: *Node) void {
             node.key = key;
+            node.color = .red;
             node.parent = parent;
             node.children = [_]?*Node{ null, null };
-            node.height = 1;
             const link: *?*Node = if (parent) |p| &p.children[@intFromBool(compare(key, p.key) == .gt)] else &self.root;
             debug.assert(link.* == null);
             link.* = node;
-            self.rebalance(node.parent);
+
+            self.insert_fixup(node);
         }
 
-        fn replace(self: *Self, old: *Node, new: *Node) void {
-            new.key = old.key;
-            new.parent = old.parent;
-            new.children = old.children;
-            new.height = old.height;
+        fn insert_fixup(self: *Self, node: *Node) void {
+            var parent: *Node = node.parent orelse {
+                node.color = .black;
+                return;
+            };
+            if (parent.color == .black) return;
+            const grandparent: *Node = parent.parent.?;
+            const parent_is_right: bool = grandparent.children[1] == parent;
+            const aunt_opt: ?*Node = grandparent.children[@intFromBool(!parent_is_right)];
 
-            const link: *?*Node = if (old.parent) |p| &p.children[@intFromBool(p.children[0] != old)] else &self.root;
-            debug.assert(link.* == old);
-            link.* = new;
-
-            for (old.children) |child_opt| {
-                const child: *Node = child_opt orelse continue;
-                debug.assert(child.parent == old);
-                child.parent = new;
+            if (aunt_opt) |aunt| blk: {
+                if (aunt.color == .black) break :blk;
+                grandparent.color = .red;
+                parent.color = .black;
+                aunt.color = .black;
+                self.insert_fixup(grandparent);
+                return;
             }
 
-            // NOTE: The `std.Treap` does not remove the old node if it's not the same node, and I wonder why.
-            // Maybe I missed something, but anyway, here it does differently.
-            if (old == new) return;
-            old.parent = null;
-            old.children = [_]?*Node{ null, null };
-            old.height = 0;
+            if ((parent.children[1] == node) != parent_is_right) {
+                self.rotate(parent, parent_is_right);
+                parent = node;
+            }
+
+            self.rotate(grandparent, !parent_is_right);
+            grandparent.color = .red;
+            parent.color = .black;
         }
 
         fn remove(self: *Self, node: *Node) void {
@@ -213,7 +182,7 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
                 debug.assert(link.* == inorder);
                 link.* = node;
 
-                mem.swap(usize, &inorder.height, &node.height);
+                mem.swap(Color, &inorder.color, &node.color);
                 mem.swap(?*Node, &inorder.parent, &node.parent);
                 mem.swap([2]?*Node, &inorder.children, &node.children);
 
@@ -222,16 +191,87 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
                 if (inorder.children[0]) |n| n.parent = inorder;
                 if (inorder.children[1]) |n| n.parent = inorder;
             }
-            const parent = node.parent;
-            const link: *?*Node = if (parent) |p| &p.children[@intFromBool(p.children[1] == node)] else &self.root;
+
+            if (node.color == .black) self.remove_fixup(node);
+
+            const link: *?*Node = if (node.parent) |p| &p.children[@intFromBool(p.children[1] == node)] else &self.root;
             debug.assert(link.* == node);
             link.* = null;
 
             debug.assert(node.children[0] == null and node.children[1] == null);
             node.parent = null;
-            node.height = 0;
+        }
 
-            self.rebalance(parent);
+        fn remove_fixup(self: *Self, node: *Node) void {
+            debug.assert(node.color == .black);
+
+            const parent: *Node = node.parent orelse return;
+            const node_lateral = parent.children[1] == node;
+            var sibling: *Node = parent.children[@intFromBool(!node_lateral)].?;
+
+            if (sibling.color == .red) {
+                parent.color = .red;
+                sibling.color = .black;
+                self.rotate(parent, node_lateral);
+                sibling = parent.children[@intFromBool(!node_lateral)].?;
+            }
+
+            if (cond: {
+                const lr_rl_color = if (sibling.children[@intFromBool(node_lateral)]) |n| n.color else .black;
+                const ll_rr_color = if (sibling.children[@intFromBool(!node_lateral)]) |n| n.color else .black;
+                break :cond lr_rl_color == .black and ll_rr_color == .black;
+            }) {
+                debug.assert(sibling.color == .black);
+                sibling.color = .red;
+                switch (parent.color) {
+                    .red => parent.color = .black,
+                    .black => self.remove_fixup(node.parent.?),
+                }
+                return;
+            }
+
+            if (cond: {
+                const lr_rl_color = if (sibling.children[@intFromBool(node_lateral)]) |n| n.color else .black;
+                const ll_rr_color = if (sibling.children[@intFromBool(!node_lateral)]) |n| n.color else .black;
+                break :cond lr_rl_color == .red and ll_rr_color == .black;
+            }) {
+                debug.assert(sibling.color == .black);
+                sibling.color = .red;
+                sibling.children[@intFromBool(node_lateral)].?.color = .black;
+                self.rotate(sibling, !node_lateral);
+                sibling = parent.children[@intFromBool(!node_lateral)].?;
+            }
+
+            debug.assert(sibling.color == .black);
+            debug.assert(sibling.children[@intFromBool(!node_lateral)].?.color == .red);
+
+            sibling.color = parent.color;
+            parent.color = .black;
+            sibling.children[@intFromBool(!node_lateral)].?.color = .black;
+            self.rotate(parent, node_lateral);
+        }
+
+        fn replace(self: *Self, old: *Node, new: *Node) void {
+            new.key = old.key;
+            new.color = old.color;
+            new.parent = old.parent;
+            new.children = old.children;
+
+            const link: *?*Node = if (old.parent) |p| &p.children[@intFromBool(p.children[0] != old)] else &self.root;
+            debug.assert(link.* == old);
+            link.* = new;
+
+            for (old.children) |child_opt| {
+                const child: *Node = child_opt orelse continue;
+                debug.assert(child.parent == old);
+                child.parent = new;
+            }
+
+            if (old == new) return;
+
+            // NOTE: `std.Treap` does not remove the old node if it's not the same node and I wonder why. Anyway, here we do differently
+            old.parent = null;
+            old.children = [_]?*Node{ null, null };
         }
 
         pub const InorderIterator = struct {
@@ -279,7 +319,6 @@ pub fn AvlTree(comptime Key: type, comptime compare_fn: anytype) type {
     };
 }
 
-// NOTE: copy-pasta from `std.Treap`
 fn SliceIterRandomOrder(comptime T: type) type {
     return struct {
         rng: std.rand.Random,
@@ -323,17 +362,68 @@ fn SliceIterRandomOrder(comptime T: type) type {
     };
 }
 
-fn test_balance_factor(tree: anytype) !void {
-    var it = tree.inorder_iterator();
-    while (it.next()) |n| {
-        try testing.expect(n.balance_factor() < 2 and n.balance_factor() > -2);
+fn test_black_height(tree: anytype) !void {
+    const Node = @TypeOf(tree.*).Node;
+    var curr_opt: ?*Node = tree.root;
+    var prev_opt: ?*Node = null;
+    const bh: usize = blk: {
+        var bh: usize = 0;
+        var node = tree.root;
+        while (node) |curr| : ({
+            node = curr.children[0];
+            if (curr.color == .black) bh += 1;
+        }) {}
+        break :blk bh;
+    };
+    var curr_bh: usize = 1;
+    while (true) {
+        const curr: *Node = curr_opt orelse break;
+        defer prev_opt = curr;
+        if (prev_opt) |prev| {
+            if (prev.color == .red) {
+                try testing.expect(curr.color == .black);
+            }
+        }
+        if (prev_opt == curr.parent) {
+            if (curr.children[0]) |left| {
+                curr_opt = left;
+                if (left.color == .black) curr_bh += 1;
+                continue;
+            }
+            if (curr.children[1]) |right| {
+                curr_opt = right;
+                if (right.color == .black) curr_bh += 1;
+            } else {
+                try testing.expect(curr_bh == bh);
+
+                curr_opt = curr.parent;
+                if (curr.color == .black) curr_bh -= 1;
+            }
+            continue;
+        }
+        if (curr.children[0] == prev_opt) {
+            if (curr.children[1]) |right| {
+                curr_opt = right;
+                if (right.color == .black) curr_bh += 1;
+            } else {
+                curr_opt = curr.parent;
+                if (curr.color == .black) curr_bh -= 1;
+            }
+            continue;
+        }
+        if (curr.children[1] == prev_opt) {
+            curr_opt = curr.parent;
+            if (curr.color == .black) curr_bh -= 1;
+            continue;
+        }
+        unreachable;
     }
 }
 
 test "insert, find, replace, remove" {
     // if (true) return error.SkipZigTest;
 
-    const TestTree = AvlTree(u64, std.math.order);
+    const TestTree = RedBlackTree(u64, std.math.order);
     const TestNode = TestTree.Node;
 
     var tree = TestTree{};
@@ -360,13 +450,11 @@ test "insert, find, replace, remove" {
         try testing.expectEqual(node.key, key);
         try testing.expectEqual(entry.key, key);
         try testing.expectEqual(entry.node, node);
-        try test_balance_factor(&tree);
+        try test_black_height(&tree);
 
         max = @max(max, key);
         min = @min(min, key);
     }
-    try testing.expectEqual(max, tree.get_max().?.key);
-    try testing.expectEqual(min, tree.get_min().?.key);
 
     // find check
     iter.reset();
@@ -407,14 +495,14 @@ test "insert, find, replace, remove" {
         try testing.expectEqual(entry.node, &stub_node);
         try testing.expectEqual(entry.node, tree.get_entry_for(key).node);
         try testing.expectEqual(entry.node, tree.get_entry_for_existing(&stub_node).node);
-        try test_balance_factor(&tree);
+        try test_black_height(&tree);
 
         // replace the stub_node back to the node and ensure future finds point to the old node.
         entry.set(node);
         try testing.expectEqual(entry.node, node);
         try testing.expectEqual(entry.node, tree.get_entry_for(key).node);
         try testing.expectEqual(entry.node, tree.get_entry_for_existing(node).node);
-        try test_balance_factor(&tree);
+        try test_black_height(&tree);
     }
     try testing.expectEqual(max, tree.get_max().?.key);
     try testing.expectEqual(min, tree.get_min().?.key);
@@ -428,27 +516,28 @@ test "insert, find, replace, remove" {
         var entry = tree.get_entry_for_existing(node);
         try testing.expectEqual(entry.key, key);
         try testing.expectEqual(entry.node, node);
-        try test_balance_factor(&tree);
+        try test_black_height(&tree);
 
         // remove the node at the entry and ensure future finds point to it being removed.
         entry.set(null);
         try testing.expectEqual(entry.node, null);
         try testing.expectEqual(entry.node, tree.get_entry_for(key).node);
-        try test_balance_factor(&tree);
+        try test_black_height(&tree);
 
         // insert the node back and ensure future finds point to the inserted node
         entry.set(node);
         try testing.expectEqual(entry.node, node);
         try testing.expectEqual(entry.node, tree.get_entry_for(key).node);
         try testing.expectEqual(entry.node, tree.get_entry_for_existing(node).node);
-        try test_balance_factor(&tree);
+        try test_black_height(&tree);
 
         // remove the node again and make sure it was cleared after the insert
         entry.set(null);
         try testing.expectEqual(entry.node, null);
         try testing.expectEqual(entry.node, tree.get_entry_for(key).node);
-        try test_balance_factor(&tree);
+        try test_black_height(&tree);
     }
+
     try testing.expect(tree.get_max() == null);
     try testing.expect(tree.get_min() == null);
 }
